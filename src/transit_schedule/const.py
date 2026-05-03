@@ -15,8 +15,8 @@ TARGET_ROUTE = config.target_route
 
 TRANSLATIONS = {
     "en": {
-        "next_bus_at_stop": f"Next {TRANSIT} Bus at Stop {{stop_code}}",
-        "transit_schedule": f"{TRANSIT} Schedule",
+        "next_bus_at_stop": "Stop {stop_code}",
+        "transit_schedule": f"Next {TRANSIT} Bus",
         "gtfs": "GTFS",
         "live_scraper": "Live Scraper",
         "no_more_buses": "No more buses for today.",
@@ -26,8 +26,8 @@ TRANSLATIONS = {
         "waiting_for": "Waiting for {interval} seconds...",
     },
     "fr": {
-        "next_bus_at_stop": f"Prochain bus {TRANSIT} à l'arrêt {{stop_code}}",
-        "transit_schedule": f"Horaire {TRANSIT}",
+        "next_bus_at_stop": "Arrêt {stop_code}",
+        "transit_schedule": f"Prochain bus {TRANSIT}",
         "gtfs": "GTFS",
         "live_scraper": "Scraper en direct",
         "no_more_buses": "Plus de bus pour aujourd'hui.",

@@ -107,5 +107,11 @@ class Config:
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
 
+    def to_safe_dict(self) -> dict[str, Any]:
+        d = self.to_dict()
+        if d.get('mqtt_password'):
+            d['mqtt_password'] = '***'
+        return d
+
 # Global config instance
 config = Config()

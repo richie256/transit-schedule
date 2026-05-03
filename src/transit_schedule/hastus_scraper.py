@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import ssl
 from typing import Any
 
 import requests
@@ -19,20 +20,24 @@ _LOGGER.propagate = False # Prevent double logging if parent has a handler
 
 class HostnameIgnoreAdapter(HTTPAdapter):
     """
-    Custom adapter to bypass hostname mismatch errors while still verifying 
-    the certificate chain. This is needed because Python's SSL module 
-    is strict about underscores in hostnames (e.g. madprep_i).
+    Custom adapter for madprep_i.rtl-longueuil.qc.ca whose hostname contains
+    an underscore, which Python's ssl module rejects during SNI hostname matching.
+    Certificate chain verification (CERT_REQUIRED) is preserved; only the hostname
+    match is disabled.
     """
     def __init__(self, *args, **kwargs):
         self.max_retries = kwargs.pop('max_retries', None)
         super().__init__(*args, **kwargs)
 
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False  # hostname contains underscore — not valid per RFC 952
+        ctx.verify_mode = ssl.CERT_REQUIRED  # still verify the certificate chain
         self.poolmanager = PoolManager(
             num_pools=connections,
             maxsize=maxsize,
             block=block,
-            assert_hostname=False,
+            ssl_context=ctx,
             **pool_kwargs
         )
 
@@ -40,13 +45,15 @@ class HastusScraper:
     BASE_URL = "https://madprep_i.rtl-longueuil.qc.ca/madOper.php"
     CACHE_FILE = "data/hastus_cache.json"
     CACHE_VERSION = "2"
-    
+    MAX_CACHE_SIZE = 500
+
     def __init__(self):
         self.buildtime = None
         self.stop_mappings = {} # stop_code (str) -> list of (feed_id:stop_id)
+        self._stop_id_to_code: dict[str, str] = {}  # stop_id (str) -> stop_code; reverse index for O(1) lookup
         self._mappings_fetched = False
         # cache: (stop_id, pattern_id, week_start_date) -> { 'weekday': [...], 'samedi': [...], 'dimanche': [...] }
-        self.schedule_cache = {} 
+        self.schedule_cache = {}
         
         # Initialize session with custom adapter and retry logic
         self.session = requests.Session()
@@ -150,6 +157,7 @@ class HastusScraper:
             response.raise_for_status()
             content = response.text
             self.stop_mappings = {}
+            self._stop_id_to_code = {}
             for entry in content.split(';'):
                 if not entry:
                     continue
@@ -161,6 +169,10 @@ class HastusScraper:
                         self.stop_mappings[stop_code] = []
                     if internal_id not in self.stop_mappings[stop_code]:
                         self.stop_mappings[stop_code].append(internal_id)
+                    # Build reverse index: "feed_id:stop_id" -> extract stop_id part
+                    id_parts = internal_id.split(':', 1)
+                    if len(id_parts) == 2:
+                        self._stop_id_to_code[id_parts[1]] = stop_code
             self._mappings_fetched = True
             _LOGGER.info(f"Fetched {len(self.stop_mappings)} stop mappings.")
         except requests.exceptions.RequestException as e:
@@ -172,13 +184,7 @@ class HastusScraper:
         """Find the public stop code for a given internal stop_id."""
         if not self._mappings_fetched:
             self.fetch_stop_mappings()
-        
-        target_id_suffix = f":{stop_id}"
-        for code, ids in self.stop_mappings.items():
-            for internal_id in ids:
-                if internal_id.endswith(target_id_suffix):
-                    return code
-        return None
+        return self._stop_id_to_code.get(str(stop_id))
 
     def get_stop_patterns(self, stop_code: str, stop_id: int | None = None) -> list[dict]:
         """Fetch available patterns/routes for a given stop code."""
@@ -373,6 +379,10 @@ class HastusScraper:
             for cat in combined_weekly_data:
                 combined_weekly_data[cat] = sorted(set(combined_weekly_data[cat]))
 
+            if len(self.schedule_cache) >= self.MAX_CACHE_SIZE:
+                evicted = next(iter(self.schedule_cache))
+                del self.schedule_cache[evicted]
+                _LOGGER.debug(f"Cache at {self.MAX_CACHE_SIZE} entries, evicted oldest entry.")
             self.schedule_cache[cache_key] = combined_weekly_data
             self._save_cache()
             

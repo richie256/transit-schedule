@@ -150,7 +150,7 @@ def start_mqtt_client():
         time.sleep(30)
         return
 
-    _LOGGER.info("Starting MQTT publisher", extra={"config": config.to_dict()})
+    _LOGGER.info("Starting MQTT publisher", extra={"config": config.to_safe_dict()})
     
     t = get_translation()
 

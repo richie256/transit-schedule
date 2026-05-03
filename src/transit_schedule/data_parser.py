@@ -96,7 +96,7 @@ class ParseTransitData:
         """Check if data needs to be refreshed and reload if necessary."""
         if force or is_file_expired(self.file_path):
             _LOGGER.info(f"Refreshing GTFS data (force={force})...")
-            self._load_data(force_download=force)
+            self._load_data(force_download=True)
 
     @staticmethod
     def _download_gtfs_file(zipfile_location) -> None:
@@ -108,9 +108,8 @@ class ParseTransitData:
 
     def get_stop_id(self, stop_code: int) -> str | None:
         """ Retrieve the stop_id based on a stop_code """
-        if not self.stops.empty:
-            self.refresh()
-            
+        self.refresh()
+
         if self.stops.empty:
             _LOGGER.debug(f"Stops data is empty, cannot resolve stop_code {stop_code}")
             return None
@@ -153,19 +152,21 @@ class ParseTransitData:
                 (self.calendar["start_date"] <= curr_date_int)
             ]
             
-            # 3. Filter out regular services that are explicitly removed in calendar_dates.txt (exception_type=2)
-            for _, service_row in regular_services.iterrows():
-                service_id = service_row["service_id"]
-                if not self.calendar_dates.empty:
-                    removed_service = self.calendar_dates[
-                        (self.calendar_dates["service_id"] == service_id) &
+            # 3. Filter out regular services explicitly removed in calendar_dates.txt (exception_type=2).
+            # Pre-compute the removed set once instead of filtering per service inside the loop.
+            removed_ids: set[str] = set()
+            if not self.calendar_dates.empty:
+                removed_ids = set(
+                    self.calendar_dates[
                         (self.calendar_dates["date"] == curr_date_int) &
                         (self.calendar_dates["exception_type"] == 2)
-                    ]
-                    if not removed_service.empty:
-                        continue # This service is removed for today
-                
-                matching_service_ids.append(service_id)
+                    ]["service_id"]
+                )
+
+            for _, service_row in regular_services.iterrows():
+                service_id = service_row["service_id"]
+                if service_id not in removed_ids:
+                    matching_service_ids.append(service_id)
             
         if not matching_service_ids:
             raise NoServiceFoundError(f"No service found for date {date}")
