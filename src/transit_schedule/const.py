@@ -35,6 +35,5 @@ TRANSLATIONS = {
         "refresh_period_ended": "Période de rafraîchissement terminée",
         "hass_status_received": "Changement de statut Home Assistant reçu",
         "waiting_for": "Attente de {interval} secondes...",
-    }
+    },
 }
-

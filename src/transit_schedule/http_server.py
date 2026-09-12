@@ -1,4 +1,3 @@
-
 import datetime
 import logging
 
@@ -19,20 +18,18 @@ def create_app(transit_data=None):
             transit_data = None
     app = Flask(__name__)
 
-    if __name__ != '__main__':
-        gunicorn_logger = logging.getLogger('gunicorn.error')
+    if __name__ != "__main__":
+        gunicorn_logger = logging.getLogger("gunicorn.error")
         _LOGGER.handlers = gunicorn_logger.handlers
         _LOGGER.setLevel(gunicorn_logger.level)
 
     @app.before_request
     def log_request_info():
-        if request.path == '/health':
+        if request.path == "/health":
             return
-        _LOGGER.info(f'Received request: {request.method} {request.path} from {request.remote_addr}')
+        _LOGGER.info(f"Received request: {request.method} {request.path} from {request.remote_addr}")
 
-
-
-    @app.route("/transit-schedule/nextstop/<int:stop_code>", methods=['GET'])
+    @app.route("/transit-schedule/nextstop/<int:stop_code>", methods=["GET"])
     def get_next_stop(stop_code: int):
         if transit_data is None:
             return jsonify({"error": "Transit data not initialized"}), 500
@@ -49,22 +46,23 @@ def create_app(transit_data=None):
             nbr_minutes, nbr_seconds = divmod(difference.total_seconds(), 60)
 
             result = {
-                'nextstop_nbrmins': int(nbr_minutes),
-                'nextstop_nbrsecs': int(nbr_seconds),
-                'route_id': str(next_stop_row.route_id),
-                'arrival_time': str(next_stop_row.arrival_time),
-                'trip_headsign': str(next_stop_row.trip_headsign),
-                'current_time': str(current_datetime.time()),
+                "nextstop_nbrmins": int(nbr_minutes),
+                "nextstop_nbrsecs": int(nbr_seconds),
+                "route_id": str(next_stop_row.route_id),
+                "arrival_time": str(next_stop_row.arrival_time),
+                "trip_headsign": str(next_stop_row.trip_headsign),
+                "current_time": str(current_datetime.time()),
             }
             return jsonify(result)
         return jsonify({"error": "No more buses for today"})
 
-    @app.route("/health", methods=['GET'])
+    @app.route("/health", methods=["GET"])
     def health_check():
         return jsonify({"status": "ok"}), 200
 
     return app
 
+
 def start_http_server():
     app = create_app()
-    app.run(host='0.0.0.0', port=80)
+    app.run(host="0.0.0.0", port=80)

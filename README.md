@@ -92,6 +92,9 @@ docker run --env-file .env -v ./data:/data \
 | `MQTT_USE_TLS` | Enable TLS for the MQTT connection | `false` |
 | `HASS_DISCOVERY_ENABLED` | Enable Home Assistant MQTT auto-discovery | `false` |
 | `HASS_DISCOVERY_PREFIX` | Home Assistant discovery prefix | `homeassistant` |
+| `MAX_POLL_INTERVAL` | Maximum wait in seconds between MQTT schedule countdown updates when a bus is upcoming | `60` |
+| `IDLE_POLL_INTERVAL` | Wait in seconds between checks when no bus is scheduled or after service hours | `300` |
+| `MAX_INIT_RETRIES` | Maximum initialization attempts on startup before exit (0 or unset for infinite retries) | None (infinite) |
 
 ---
 

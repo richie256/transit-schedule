@@ -16,5 +16,6 @@ def main():
     else:
         _LOGGER.error(f"Invalid mode: {mode}")
 
+
 if __name__ == "__main__":
     main()
