@@ -110,6 +110,9 @@ class Config:
         )
 
         self.mqtt_hass_status_topic = os.environ.get("MQTT_HASS_STATUS_TOPIC", f"{self.hass_discovery_prefix}/status")
+        self.mqtt_availability_topic = os.environ.get(
+            "MQTT_AVAILABILITY_TOPIC", f"home/transit/{self.transit.lower()}/status"
+        )
 
     @property
     def stop_code(self):

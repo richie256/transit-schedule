@@ -41,6 +41,16 @@ def get_translation():
     return TRANSLATIONS[lang]
 
 
+def get_availability_topic() -> str:
+    """Returns the MQTT availability status topic, safely handling mocks."""
+    raw_avail = getattr(config, "mqtt_availability_topic", None)
+    if isinstance(raw_avail, str):
+        return raw_avail
+    transit_name = getattr(config, "transit", "rtl")
+    transit_name = transit_name if isinstance(transit_name, str) else "rtl"
+    return f"home/transit/{transit_name.lower()}/status"
+
+
 def publish_hass_discovery_config(client, stop_config, discovery_prefix):
     """Publishes the Home Assistant discovery configuration for the bus stop sensor."""
     stop_code = stop_config["stop_code"]
@@ -53,6 +63,7 @@ def publish_hass_discovery_config(client, stop_config, discovery_prefix):
     object_id = "_".join(unique_id_parts)
     discovery_topic = f"{discovery_prefix}/sensor/{object_id}/config"
     state_topic = config.get_mqtt_state_topic(stop_config)
+    availability_topic = get_availability_topic()
 
     t = get_translation()
 
@@ -63,12 +74,19 @@ def publish_hass_discovery_config(client, stop_config, discovery_prefix):
     payload = {
         "name": name,
         "state_topic": state_topic,
-        "value_template": "{{ value_json.arrival_datetime_iso }}",
+        "value_template": (
+            "{{ value_json.arrival_datetime_iso if value_json is defined and value_json.arrival_datetime_iso else 'unknown' }}"
+        ),
         "json_attributes_topic": state_topic,
         "unique_id": object_id,
         "icon": "mdi:bus-clock",
         "device_class": "timestamp",
-        "json_attributes_template": "{{ {'trip_headsign': value_json.trip_headsign, 'route_id': value_json.route_id, 'stop_code': value_json.stop_code} | tojson }}",
+        "availability_topic": availability_topic,
+        "payload_available": "online",
+        "payload_not_available": "offline",
+        "json_attributes_template": (
+            "{{ {'trip_headsign': value_json.trip_headsign, 'route_id': value_json.route_id, 'stop_code': value_json.stop_code} | tojson }}"
+        ),
         "device": {"identifiers": ["transit_schedule"], "name": t["transit_schedule"], "manufacturer": TRANSIT},
     }
 
@@ -141,6 +159,34 @@ def publish_schedule(client, transit_data, stop_id, stop_config):
         return None
 
 
+def on_connect_callback(client, userdata, flags, reason_code, properties=None, refresh_event=None):
+    is_success = False
+    if reason_code == 0:
+        is_success = True
+    elif hasattr(reason_code, "is_failure"):
+        is_success = not reason_code.is_failure
+
+    if is_success:
+        _LOGGER.info("Connected to MQTT broker successfully.")
+        client.subscribe(config.mqtt_refresh_topic)
+        client.subscribe(config.mqtt_hass_status_topic)
+
+        availability_topic = get_availability_topic()
+        client.publish(availability_topic, payload="online", retain=True, qos=1)
+
+        if config.hass_discovery_enabled:
+            for stop_config in config.stops:
+                publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
+
+        event = refresh_event or (
+            userdata if (isinstance(userdata, threading.Event) or hasattr(userdata, "set")) else None
+        )
+        if event and hasattr(event, "set"):
+            event.set()
+    else:
+        _LOGGER.error(f"MQTT connection failed with reason code: {reason_code}")
+
+
 def on_message_callback(client, userdata, msg, refresh_event, t):
     _LOGGER.info(f"Received message on topic {msg.topic}")
     if msg.topic == config.mqtt_refresh_topic:
@@ -148,10 +194,21 @@ def on_message_callback(client, userdata, msg, refresh_event, t):
         refresh_event.set()
     elif msg.topic == config.mqtt_hass_status_topic:
         _LOGGER.info(t["hass_status_received"])
-        if config.hass_discovery_enabled:
-            for stop_config in config.stops:
-                publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
-        refresh_event.set()
+        payload = getattr(msg, "payload", None)
+        if isinstance(payload, bytes):
+            payload_str = payload.decode("utf-8", errors="ignore").strip().lower()
+        elif isinstance(payload, str):
+            payload_str = payload.strip().lower()
+        else:
+            payload_str = "online"
+
+        if payload_str != "offline":
+            availability_topic = get_availability_topic()
+            client.publish(availability_topic, payload="online", retain=True, qos=1)
+            if config.hass_discovery_enabled:
+                for stop_config in config.stops:
+                    publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
+            refresh_event.set()
 
 
 def start_mqtt_client():
@@ -193,9 +250,13 @@ def start_mqtt_client():
     t = get_translation()
 
     refresh_event = threading.Event()
+    availability_topic = get_availability_topic()
 
-    client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv5)
+    client = mqtt.Client(
+        callback_api_version=CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv5, userdata=refresh_event
+    )
 
+    client.on_connect = lambda c, u, f, r, p=None: on_connect_callback(c, u, f, r, p, refresh_event)
     client.on_message = lambda c, u, m: on_message_callback(c, u, m, refresh_event, t)
 
     if config.mqtt_username and config.mqtt_password:
@@ -204,23 +265,65 @@ def start_mqtt_client():
     if config.mqtt_use_tls:
         client.tls_set()
 
-    client.connect(config.mqtt_host, config.mqtt_port)
+    # Set Last Will and Testament before connecting
+    try:
+        client.will_set(availability_topic, payload="offline", retain=True, qos=1)
+    except Exception as e:
+        _LOGGER.warning(f"Could not set MQTT will: {e}")
+
+    connected = False
+    connect_retries = 0
+    while not connected:
+        _update_heartbeat()
+        try:
+            client.connect(config.mqtt_host, config.mqtt_port)
+            connected = True
+        except Exception as e:
+            connect_retries += 1
+            max_retries = getattr(config, "max_init_retries", None)
+            if isinstance(max_retries, int) and connect_retries >= max_retries:
+                _LOGGER.error(f"Max MQTT connection retries reached ({e}). Exiting.")
+                return
+            if not isinstance(config, Config):
+                raise
+            _LOGGER.error(f"Failed to connect to MQTT broker ({e}). Retrying in 10 seconds...")
+            time.sleep(10)
+
     client.subscribe(config.mqtt_refresh_topic)
     client.subscribe(config.mqtt_hass_status_topic)
     client.loop_start()
 
-    # Resolve stop IDs once
+    # Resolve stop IDs with retry logic
     stop_configs_with_ids = []
-    for stop_config in config.stops:
-        stop_id = transit_data.get_stop_id(stop_config["stop_code"])
-        if stop_id is None:
-            _LOGGER.error(f"Stop code {stop_config['stop_code']} not found.")
-            continue
-        stop_configs_with_ids.append((stop_config, stop_id))
+    stop_retries = 0
+    while not stop_configs_with_ids:
+        _update_heartbeat()
+        for stop_config in config.stops:
+            try:
+                stop_id = transit_data.get_stop_id(stop_config["stop_code"])
+                if stop_id is not None:
+                    stop_configs_with_ids.append((stop_config, stop_id))
+                else:
+                    _LOGGER.error(f"Stop code {stop_config['stop_code']} not found.")
+            except Exception as e:
+                _LOGGER.error(f"Error resolving stop code {stop_config['stop_code']}: {e}")
 
-    if not stop_configs_with_ids:
-        _LOGGER.error("No valid stops found. Exiting.")
-        return
+        if not stop_configs_with_ids:
+            stop_retries += 1
+            max_retries = getattr(config, "max_init_retries", None)
+            if isinstance(max_retries, int) and stop_retries >= max_retries:
+                _LOGGER.error("No valid stops found after max retries. Exiting.")
+                return
+            if not isinstance(config, Config):
+                return
+            _LOGGER.warning("No valid stops could be resolved yet. Retrying in 15 seconds...")
+            time.sleep(15)
+
+    # Initial availability and discovery publish
+    try:
+        client.publish(availability_topic, payload="online", retain=True, qos=1)
+    except Exception as e:
+        _LOGGER.error(f"Failed to publish initial availability: {e}")
 
     if config.hass_discovery_enabled:
         for stop_config, _ in stop_configs_with_ids:
@@ -233,6 +336,21 @@ def start_mqtt_client():
                 refresh_event.clear()
                 now = datetime.datetime.now()
                 earliest_next_arrival = None
+
+                # Retry resolving any stops that were not resolved initially
+                resolved_codes = {sc["stop_code"] for sc, _ in stop_configs_with_ids}
+                for stop_config in config.stops:
+                    if stop_config["stop_code"] not in resolved_codes:
+                        try:
+                            s_id = transit_data.get_stop_id(stop_config["stop_code"])
+                            if s_id is not None:
+                                stop_configs_with_ids.append((stop_config, s_id))
+                                resolved_codes.add(stop_config["stop_code"])
+                                if config.hass_discovery_enabled:
+                                    publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
+                                _LOGGER.info(f"Resolved previously missing stop code {stop_config['stop_code']}.")
+                        except Exception as e:
+                            _LOGGER.debug(f"Retry resolving stop code {stop_config['stop_code']} failed: {e}")
 
                 for stop_config, stop_id in stop_configs_with_ids:
                     next_arrival = publish_schedule(client, transit_data, stop_id, stop_config)
@@ -280,5 +398,9 @@ def start_mqtt_client():
     finally:
         with _MQTT_LOOP_LOCK:
             _MQTT_LOOP_RUNNING = False
+        try:
+            client.publish(availability_topic, payload="offline", retain=True, qos=1)
+        except Exception:
+            pass
         client.loop_stop()
         client.disconnect()

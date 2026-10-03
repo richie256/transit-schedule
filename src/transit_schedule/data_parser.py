@@ -404,7 +404,11 @@ class ParseTransitData:
         # Fallback to Hastus Scraper (RTL Only)
         if config.transit == "RTL":
             live_arrivals = self.scraper.get_schedule(
-                stop_id, parm_datetime.date(), target_route=target_route, target_direction=target_direction
+                stop_id,
+                parm_datetime.date(),
+                target_route=target_route,
+                target_direction=target_direction,
+                stop_code=str(stop_code) if stop_code else None,
             )
             if live_arrivals:
                 _LOGGER.info(f"Found {len(live_arrivals)} arrivals via live scraper for stop {display_stop}")

@@ -526,17 +526,19 @@ class HastusScraper:
         feed_id: int = 15,
         target_route: str | None = None,
         target_direction: str | None = None,
+        stop_code: str | None = None,
     ) -> list[dict[str, Any]]:
         """Smart fallback: discovers patterns for the stop and fetches all schedules."""
         if TRANSIT != "RTL":
             _LOGGER.debug(f"Live scraper not available for {TRANSIT}")
             return []
 
-        stop_code = self.get_stop_code_from_id(stop_id)
-        if not stop_code:
+        resolved_stop_code = str(stop_code) if stop_code else self.get_stop_code_from_id(stop_id)
+        if not resolved_stop_code:
             _LOGGER.error(f"Could not map internal stop_id {stop_id} to a stop code.")
             return []
 
+        stop_code = resolved_stop_code
         _LOGGER.info(f"Fallback: Discovered stop code {stop_code} for ID {stop_id}")
         patterns = self.get_stop_patterns(stop_code, stop_id=stop_id)
 
