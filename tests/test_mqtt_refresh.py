@@ -92,7 +92,7 @@ def test_on_message_hass_status(
     except KeyboardInterrupt:
         pass
 
-    # Verify that discovery config was published (once at start, once on HA status)
-    assert mock_publish_discovery.call_count == 2
+    # Verify that discovery config was published (at start, in main loop, and on HA status)
+    assert mock_publish_discovery.call_count >= 2
     # Verify schedule was published (at least once at start of loop)
     assert mock_publish_schedule.called

@@ -7,6 +7,7 @@ from transit_schedule.mqtt_client import (
     get_availability_topic,
     on_connect_callback,
     on_message_callback,
+    publish_availability,
     publish_hass_discovery_config,
     publish_schedule,
     start_mqtt_client,
@@ -249,7 +250,7 @@ def test_discovery_config_availability_and_template(mock_cfg):
     assert payload["availability_topic"] == "home/transit/rtl/status"
     assert payload["payload_available"] == "online"
     assert payload["payload_not_available"] == "offline"
-    assert "unknown" in payload["value_template"]
+    assert "arrival_datetime_iso" in payload["value_template"]
 
 
 @patch("transit_schedule.mqtt_client.config")
@@ -354,3 +355,91 @@ def test_start_mqtt_client_connect_retry(mock_sleep, mock_parser, mock_mqtt_clie
 
     assert client_inst.connect.call_count == 2
     mock_sleep.assert_called_with(10)
+
+
+@patch("transit_schedule.mqtt_client.config")
+def test_publish_availability(mock_cfg):
+    mock_cfg.mqtt_availability_topic = "home/transit/rtl/status"
+    client = MagicMock()
+    publish_availability(client, "online")
+    client.publish.assert_called_once_with("home/transit/rtl/status", payload="online", retain=True, qos=1)
+
+    # Disabled availability
+    mock_cfg.mqtt_availability_topic = None
+    mock_cfg.transit = "rtl"
+    client.reset_mock()
+    with patch("transit_schedule.mqtt_client.get_availability_topic", return_value=None):
+        publish_availability(client, "online")
+        client.publish.assert_not_called()
+
+
+@patch("transit_schedule.mqtt_client.config")
+def test_get_availability_topic_none_or_disabled(mock_cfg):
+    mock_cfg.mqtt_availability_topic = "none"
+    assert get_availability_topic() is None
+
+    mock_cfg.mqtt_availability_topic = "false"
+    assert get_availability_topic() is None
+
+    mock_cfg.mqtt_availability_topic = ""
+    assert get_availability_topic() is None
+
+
+@patch("transit_schedule.mqtt_client.config")
+def test_discovery_config_with_route_id_dual_publishes(mock_cfg):
+    mock_cfg.hass_discovery_prefix = "homeassistant"
+    mock_cfg.transit = "RTL"
+    mock_cfg.mqtt_availability_topic = "home/transit/rtl/status"
+    mock_cfg.get_mqtt_state_topic.return_value = "home/transit/rtl/stop_12345_14"
+
+    mock_client = MagicMock()
+    stop_config = {"stop_code": "12345", "route_id": "14"}
+    publish_hass_discovery_config(mock_client, stop_config, "homeassistant")
+
+    # Should publish route-specific discovery AND base stop discovery
+    assert mock_client.publish.call_count == 2
+    topics = [call_args[0][0] for call_args in mock_client.publish.call_args_list]
+    assert "homeassistant/sensor/transit_schedule_12345_14/config" in topics
+    assert "homeassistant/sensor/transit_schedule_12345/config" in topics
+
+
+@patch("transit_schedule.mqtt_client.config")
+def test_discovery_config_availability_disabled(mock_cfg):
+    mock_cfg.hass_discovery_prefix = "homeassistant"
+    mock_cfg.transit = "RTL"
+    mock_cfg.mqtt_availability_topic = "none"
+    mock_cfg.get_mqtt_state_topic.return_value = "home/transit/rtl/stop_12345"
+
+    mock_client = MagicMock()
+    stop_config = {"stop_code": "12345"}
+    publish_hass_discovery_config(mock_client, stop_config, "homeassistant")
+
+    mock_client.publish.assert_called_once()
+    payload = json.loads(mock_client.publish.call_args[0][1])
+    assert "availability_topic" not in payload
+
+
+@patch("transit_schedule.mqtt_client.config")
+def test_publish_schedule_dual_publishes_with_route_id(mock_cfg):
+    mock_cfg.transit = "RTL"
+    mock_cfg.get_mqtt_state_topic.return_value = "home/transit/rtl/stop_12345_14"
+    mock_cfg.language = "fr"
+
+    mock_client = MagicMock()
+    mock_transit_data = MagicMock()
+    mock_next_stop = MagicMock()
+    mock_next_stop.arrival_datetime = datetime.datetime.now() + datetime.timedelta(minutes=5)
+    mock_next_stop.route_id = "14"
+    mock_next_stop.arrival_time = "12:00:00"
+    mock_next_stop.trip_headsign = "Test Headsign"
+    mock_next_stop.retrieve_method = "live scraper"
+    mock_transit_data.get_next_stop.return_value = mock_next_stop
+
+    stop_config = {"stop_code": "12345", "route_id": "14"}
+    publish_schedule(mock_client, mock_transit_data, "stop_id", stop_config)
+
+    # Should publish to route-specific topic AND base stop topic
+    assert mock_client.publish.call_count == 2
+    topics = [call_args[0][0] for call_args in mock_client.publish.call_args_list]
+    assert "home/transit/rtl/stop_12345_14" in topics
+    assert "home/transit/rtl/stop_12345" in topics

@@ -109,10 +109,11 @@ class Config:
             else f"home/transit/{self.transit.lower()}/stop_unknown",
         )
 
-        self.mqtt_hass_status_topic = os.environ.get("MQTT_HASS_STATUS_TOPIC", f"{self.hass_discovery_prefix}/status")
-        self.mqtt_availability_topic = os.environ.get(
-            "MQTT_AVAILABILITY_TOPIC", f"home/transit/{self.transit.lower()}/status"
-        )
+        raw_avail = os.environ.get("MQTT_AVAILABILITY_TOPIC", f"home/transit/{self.transit.lower()}/status")
+        if raw_avail and raw_avail.strip().lower() in ("none", "false", "off", "0", ""):
+            self.mqtt_availability_topic = None
+        else:
+            self.mqtt_availability_topic = raw_avail
 
     @property
     def stop_code(self):

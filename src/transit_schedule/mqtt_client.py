@@ -41,32 +41,35 @@ def get_translation():
     return TRANSLATIONS[lang]
 
 
-def get_availability_topic() -> str:
+def get_availability_topic() -> str | None:
     """Returns the MQTT availability status topic, safely handling mocks."""
     raw_avail = getattr(config, "mqtt_availability_topic", None)
-    if isinstance(raw_avail, str):
-        return raw_avail
+    if raw_avail is not None:
+        if isinstance(raw_avail, str):
+            if raw_avail.strip().lower() in ("none", "false", "off", "0", ""):
+                return None
+            return raw_avail
+        return None
     transit_name = getattr(config, "transit", "rtl")
     transit_name = transit_name if isinstance(transit_name, str) else "rtl"
     return f"home/transit/{transit_name.lower()}/status"
 
 
-def publish_hass_discovery_config(client, stop_config, discovery_prefix):
-    """Publishes the Home Assistant discovery configuration for the bus stop sensor."""
-    stop_code = stop_config["stop_code"]
-    route_id = stop_config.get("route_id")
+def publish_availability(client, status="online"):
+    """Publishes availability status (online/offline) to the availability topic if enabled."""
+    avail_topic = get_availability_topic()
+    if avail_topic:
+        try:
+            client.publish(avail_topic, payload=status, retain=True, qos=1)
+            _LOGGER.info(
+                f"Published availability '{status}' to topic '{avail_topic}'",
+                extra={"topic": avail_topic, "status": status},
+            )
+        except Exception as e:
+            _LOGGER.error(f"Failed to publish availability status '{status}': {e}")
 
-    unique_id_parts = ["transit_schedule", str(stop_code)]
-    if route_id:
-        unique_id_parts.append(str(route_id))
 
-    object_id = "_".join(unique_id_parts)
-    discovery_topic = f"{discovery_prefix}/sensor/{object_id}/config"
-    state_topic = config.get_mqtt_state_topic(stop_config)
-    availability_topic = get_availability_topic()
-
-    t = get_translation()
-
+def _build_discovery_payload(stop_code, route_id, state_topic, unique_id, t, avail_topic):
     name = t["next_bus_at_stop"].format(stop_code=stop_code)
     if route_id:
         name += f" ({route_id})"
@@ -75,25 +78,56 @@ def publish_hass_discovery_config(client, stop_config, discovery_prefix):
         "name": name,
         "state_topic": state_topic,
         "value_template": (
-            "{{ value_json.arrival_datetime_iso if value_json is defined and value_json.arrival_datetime_iso else 'unknown' }}"
+            "{{ value_json.arrival_datetime_iso if (value_json is defined and value_json.arrival_datetime_iso) else '' }}"
         ),
         "json_attributes_topic": state_topic,
-        "unique_id": object_id,
+        "unique_id": unique_id,
         "icon": "mdi:bus-clock",
         "device_class": "timestamp",
-        "availability_topic": availability_topic,
-        "payload_available": "online",
-        "payload_not_available": "offline",
         "json_attributes_template": (
             "{{ {'trip_headsign': value_json.trip_headsign, 'route_id': value_json.route_id, 'stop_code': value_json.stop_code} | tojson }}"
         ),
         "device": {"identifiers": ["transit_schedule"], "name": t["transit_schedule"], "manufacturer": TRANSIT},
     }
+    if avail_topic:
+        payload["availability_topic"] = avail_topic
+        payload["payload_available"] = "online"
+        payload["payload_not_available"] = "offline"
+    return payload
 
+
+def publish_hass_discovery_config(client, stop_config, discovery_prefix):
+    """Publishes the Home Assistant discovery configuration for the bus stop sensor."""
+    stop_code = stop_config["stop_code"]
+    route_id = stop_config.get("route_id")
+    avail_topic = get_availability_topic()
+    t = get_translation()
+
+    # 1. Primary entity: route-specific if route_id is provided, otherwise stop_code
+    unique_id_parts = ["transit_schedule", str(stop_code)]
+    if route_id:
+        unique_id_parts.append(str(route_id))
+    object_id = "_".join(unique_id_parts)
+    discovery_topic = f"{discovery_prefix}/sensor/{object_id}/config"
+    state_topic = config.get_mqtt_state_topic(stop_config)
+
+    payload = _build_discovery_payload(stop_code, route_id, state_topic, object_id, t, avail_topic)
     client.publish(discovery_topic, json.dumps(payload), retain=True)
     _LOGGER.info(
         "Published Home Assistant discovery configuration", extra={"topic": discovery_topic, "payload": payload}
     )
+
+    # 2. Backwards-compatibility entity: if route_id is provided, also publish discovery for the base stop_code
+    if route_id:
+        base_object_id = f"transit_schedule_{stop_code}"
+        base_discovery_topic = f"{discovery_prefix}/sensor/{base_object_id}/config"
+        base_state_topic = f"home/transit/{config.transit.lower()}/stop_{stop_code}"
+        base_payload = _build_discovery_payload(stop_code, None, base_state_topic, base_object_id, t, avail_topic)
+        client.publish(base_discovery_topic, json.dumps(base_payload), retain=True)
+        _LOGGER.debug(
+            "Published Home Assistant base discovery configuration",
+            extra={"topic": base_discovery_topic, "payload": base_payload},
+        )
 
 
 def publish_schedule(client, transit_data, stop_id, stop_config):
@@ -138,6 +172,16 @@ def publish_schedule(client, transit_data, stop_id, stop_config):
         topic = config.get_mqtt_state_topic(stop_config)
         client.publish(topic, json.dumps(payload), retain=True)
         _LOGGER.info(f"Published to MQTT topic '{topic}'", extra={"topic": topic, "payload": payload})
+
+        # Dual-publish to base stop topic for backwards compatibility if route_id is present
+        if target_route:
+            base_topic = f"home/transit/{config.transit.lower()}/stop_{stop_code}"
+            if base_topic != topic:
+                client.publish(base_topic, json.dumps(payload), retain=True)
+                _LOGGER.debug(
+                    f"Published to base MQTT topic '{base_topic}'", extra={"topic": base_topic, "payload": payload}
+                )
+
         return next_stop_row.arrival_datetime
     else:
         _LOGGER.info(f"{t['no_more_buses']} for stop {stop_code}")
@@ -156,6 +200,16 @@ def publish_schedule(client, transit_data, stop_id, stop_config):
         topic = config.get_mqtt_state_topic(stop_config)
         client.publish(topic, json.dumps(payload), retain=True)
         _LOGGER.info(f"Published no more buses to MQTT topic '{topic}'", extra={"topic": topic, "payload": payload})
+
+        if target_route:
+            base_topic = f"home/transit/{config.transit.lower()}/stop_{stop_code}"
+            if base_topic != topic:
+                client.publish(base_topic, json.dumps(payload), retain=True)
+                _LOGGER.debug(
+                    f"Published no more buses to base MQTT topic '{base_topic}'",
+                    extra={"topic": base_topic, "payload": payload},
+                )
+
         return None
 
 
@@ -171,8 +225,7 @@ def on_connect_callback(client, userdata, flags, reason_code, properties=None, r
         client.subscribe(config.mqtt_refresh_topic)
         client.subscribe(config.mqtt_hass_status_topic)
 
-        availability_topic = get_availability_topic()
-        client.publish(availability_topic, payload="online", retain=True, qos=1)
+        publish_availability(client, "online")
 
         if config.hass_discovery_enabled:
             for stop_config in config.stops:
@@ -203,8 +256,7 @@ def on_message_callback(client, userdata, msg, refresh_event, t):
             payload_str = "online"
 
         if payload_str != "offline":
-            availability_topic = get_availability_topic()
-            client.publish(availability_topic, payload="online", retain=True, qos=1)
+            publish_availability(client, "online")
             if config.hass_discovery_enabled:
                 for stop_config in config.stops:
                     publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
@@ -252,9 +304,7 @@ def start_mqtt_client():
     refresh_event = threading.Event()
     availability_topic = get_availability_topic()
 
-    client = mqtt.Client(
-        callback_api_version=CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv5, userdata=refresh_event
-    )
+    client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv5, userdata=refresh_event)
 
     client.on_connect = lambda c, u, f, r, p=None: on_connect_callback(c, u, f, r, p, refresh_event)
     client.on_message = lambda c, u, m: on_message_callback(c, u, m, refresh_event, t)
@@ -265,11 +315,12 @@ def start_mqtt_client():
     if config.mqtt_use_tls:
         client.tls_set()
 
-    # Set Last Will and Testament before connecting
-    try:
-        client.will_set(availability_topic, payload="offline", retain=True, qos=1)
-    except Exception as e:
-        _LOGGER.warning(f"Could not set MQTT will: {e}")
+    # Set Last Will and Testament before connecting if availability is enabled
+    if availability_topic:
+        try:
+            client.will_set(availability_topic, payload="offline", retain=True, qos=1)
+        except Exception as e:
+            _LOGGER.warning(f"Could not set MQTT will: {e}")
 
     connected = False
     connect_retries = 0
@@ -320,10 +371,7 @@ def start_mqtt_client():
             time.sleep(15)
 
     # Initial availability and discovery publish
-    try:
-        client.publish(availability_topic, payload="online", retain=True, qos=1)
-    except Exception as e:
-        _LOGGER.error(f"Failed to publish initial availability: {e}")
+    publish_availability(client, "online")
 
     if config.hass_discovery_enabled:
         for stop_config, _ in stop_configs_with_ids:
@@ -336,6 +384,13 @@ def start_mqtt_client():
                 refresh_event.clear()
                 now = datetime.datetime.now()
                 earliest_next_arrival = None
+
+                # Keep availability alive and republish discovery every cycle
+                # so that Home Assistant always receives configs/online even after late restart
+                publish_availability(client, "online")
+                if config.hass_discovery_enabled:
+                    for stop_config, _ in stop_configs_with_ids:
+                        publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
 
                 # Retry resolving any stops that were not resolved initially
                 resolved_codes = {sc["stop_code"] for sc, _ in stop_configs_with_ids}
@@ -398,9 +453,11 @@ def start_mqtt_client():
     finally:
         with _MQTT_LOOP_LOCK:
             _MQTT_LOOP_RUNNING = False
-        try:
-            client.publish(availability_topic, payload="offline", retain=True, qos=1)
-        except Exception:
-            pass
+        avail_topic = get_availability_topic()
+        if avail_topic:
+            try:
+                client.publish(avail_topic, payload="offline", retain=False, qos=1)
+            except Exception:
+                pass
         client.loop_stop()
         client.disconnect()
