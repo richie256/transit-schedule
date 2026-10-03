@@ -55,12 +55,23 @@ def get_availability_topic() -> str | None:
     return f"home/transit/{transit_name.lower()}/status"
 
 
-def publish_availability(client, status="online"):
+def get_mqtt_protocol():
+    """Returns the MQTT protocol version to use based on configuration."""
+    proto_str = getattr(config, "mqtt_protocol", "3.1.1")
+    if not isinstance(proto_str, str):
+        proto_str = "3.1.1"
+    proto_str = proto_str.strip().lower()
+    if proto_str in ("5", "5.0", "v5", "mqttv5"):
+        return mqtt.MQTTv5
+    return mqtt.MQTTv311
+
+
+def publish_availability(client, status="online", qos=0):
     """Publishes availability status (online/offline) to the availability topic if enabled."""
     avail_topic = get_availability_topic()
     if avail_topic:
         try:
-            client.publish(avail_topic, payload=status, retain=True, qos=1)
+            client.publish(avail_topic, payload=status, retain=True, qos=qos)
             _LOGGER.info(
                 f"Published availability '{status}' to topic '{avail_topic}'",
                 extra={"topic": avail_topic, "status": status},
@@ -124,7 +135,7 @@ def publish_hass_discovery_config(client, stop_config, discovery_prefix):
         base_state_topic = f"home/transit/{config.transit.lower()}/stop_{stop_code}"
         base_payload = _build_discovery_payload(stop_code, None, base_state_topic, base_object_id, t, avail_topic)
         client.publish(base_discovery_topic, json.dumps(base_payload), retain=True)
-        _LOGGER.debug(
+        _LOGGER.info(
             "Published Home Assistant base discovery configuration",
             extra={"topic": base_discovery_topic, "payload": base_payload},
         )
@@ -178,7 +189,7 @@ def publish_schedule(client, transit_data, stop_id, stop_config):
             base_topic = f"home/transit/{config.transit.lower()}/stop_{stop_code}"
             if base_topic != topic:
                 client.publish(base_topic, json.dumps(payload), retain=True)
-                _LOGGER.debug(
+                _LOGGER.info(
                     f"Published to base MQTT topic '{base_topic}'", extra={"topic": base_topic, "payload": payload}
                 )
 
@@ -205,7 +216,7 @@ def publish_schedule(client, transit_data, stop_id, stop_config):
             base_topic = f"home/transit/{config.transit.lower()}/stop_{stop_code}"
             if base_topic != topic:
                 client.publish(base_topic, json.dumps(payload), retain=True)
-                _LOGGER.debug(
+                _LOGGER.info(
                     f"Published no more buses to base MQTT topic '{base_topic}'",
                     extra={"topic": base_topic, "payload": payload},
                 )
@@ -214,14 +225,48 @@ def publish_schedule(client, transit_data, stop_id, stop_config):
 
 
 def on_connect_callback(client, userdata, flags, reason_code, properties=None, refresh_event=None):
-    is_success = False
-    if reason_code == 0:
-        is_success = True
-    elif hasattr(reason_code, "is_failure"):
-        is_success = not reason_code.is_failure
+    try:
+        is_success = False
+        if reason_code == 0:
+            is_success = True
+        elif hasattr(reason_code, "is_failure"):
+            is_success = not reason_code.is_failure
 
-    if is_success:
-        _LOGGER.info("Connected to MQTT broker successfully.")
+        if is_success:
+            _LOGGER.info("Connected to MQTT broker successfully.")
+            refresh_topic = (
+                getattr(config, "mqtt_refresh_topic", None)
+                or f"{getattr(config, 'transit', 'rtl').lower()}/schedule/refresh"
+            )
+            status_topic = (
+                getattr(config, "mqtt_hass_status_topic", None)
+                or f"{getattr(config, 'hass_discovery_prefix', 'homeassistant')}/status"
+            )
+            client.subscribe(refresh_topic)
+            client.subscribe(status_topic)
+
+            publish_availability(client, "online", qos=0)
+
+            if getattr(config, "hass_discovery_enabled", False):
+                for stop_config in getattr(config, "stops", []):
+                    publish_hass_discovery_config(
+                        client, stop_config, getattr(config, "hass_discovery_prefix", "homeassistant")
+                    )
+
+            event = refresh_event or (
+                userdata if (isinstance(userdata, threading.Event) or hasattr(userdata, "set")) else None
+            )
+            if event and hasattr(event, "set"):
+                event.set()
+        else:
+            _LOGGER.error(f"MQTT connection failed with reason code: {reason_code}")
+    except Exception as e:
+        _LOGGER.error(f"Error in on_connect_callback: {e}")
+
+
+def on_message_callback(client, userdata, msg, refresh_event, t):
+    try:
+        _LOGGER.info(f"Received message on topic {msg.topic}")
         refresh_topic = (
             getattr(config, "mqtt_refresh_topic", None)
             or f"{getattr(config, 'transit', 'rtl').lower()}/schedule/refresh"
@@ -230,56 +275,29 @@ def on_connect_callback(client, userdata, flags, reason_code, properties=None, r
             getattr(config, "mqtt_hass_status_topic", None)
             or f"{getattr(config, 'hass_discovery_prefix', 'homeassistant')}/status"
         )
-        client.subscribe(refresh_topic)
-        client.subscribe(status_topic)
-
-        publish_availability(client, "online")
-
-        if getattr(config, "hass_discovery_enabled", False):
-            for stop_config in getattr(config, "stops", []):
-                publish_hass_discovery_config(
-                    client, stop_config, getattr(config, "hass_discovery_prefix", "homeassistant")
-                )
-
-        event = refresh_event or (
-            userdata if (isinstance(userdata, threading.Event) or hasattr(userdata, "set")) else None
-        )
-        if event and hasattr(event, "set"):
-            event.set()
-    else:
-        _LOGGER.error(f"MQTT connection failed with reason code: {reason_code}")
-
-
-def on_message_callback(client, userdata, msg, refresh_event, t):
-    _LOGGER.info(f"Received message on topic {msg.topic}")
-    refresh_topic = (
-        getattr(config, "mqtt_refresh_topic", None) or f"{getattr(config, 'transit', 'rtl').lower()}/schedule/refresh"
-    )
-    status_topic = (
-        getattr(config, "mqtt_hass_status_topic", None)
-        or f"{getattr(config, 'hass_discovery_prefix', 'homeassistant')}/status"
-    )
-    if msg.topic == refresh_topic:
-        _LOGGER.info(t["refresh_action_received"])
-        refresh_event.set()
-    elif msg.topic == status_topic:
-        _LOGGER.info(t["hass_status_received"])
-        payload = getattr(msg, "payload", None)
-        if isinstance(payload, bytes):
-            payload_str = payload.decode("utf-8", errors="ignore").strip().lower()
-        elif isinstance(payload, str):
-            payload_str = payload.strip().lower()
-        else:
-            payload_str = "online"
-
-        if payload_str != "offline":
-            publish_availability(client, "online")
-            if getattr(config, "hass_discovery_enabled", False):
-                for stop_config in getattr(config, "stops", []):
-                    publish_hass_discovery_config(
-                        client, stop_config, getattr(config, "hass_discovery_prefix", "homeassistant")
-                    )
+        if msg.topic == refresh_topic:
+            _LOGGER.info(t["refresh_action_received"])
             refresh_event.set()
+        elif msg.topic == status_topic:
+            _LOGGER.info(t["hass_status_received"])
+            payload = getattr(msg, "payload", None)
+            if isinstance(payload, bytes):
+                payload_str = payload.decode("utf-8", errors="ignore").strip().lower()
+            elif isinstance(payload, str):
+                payload_str = payload.strip().lower()
+            else:
+                payload_str = "online"
+
+            if payload_str != "offline":
+                publish_availability(client, "online", qos=0)
+                if getattr(config, "hass_discovery_enabled", False):
+                    for stop_config in getattr(config, "stops", []):
+                        publish_hass_discovery_config(
+                            client, stop_config, getattr(config, "hass_discovery_prefix", "homeassistant")
+                        )
+                refresh_event.set()
+    except Exception as e:
+        _LOGGER.error(f"Error in on_message_callback: {e}")
 
 
 def start_mqtt_client():
@@ -323,7 +341,9 @@ def start_mqtt_client():
     refresh_event = threading.Event()
     availability_topic = get_availability_topic()
 
-    client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv5, userdata=refresh_event)
+    protocol = get_mqtt_protocol()
+    client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2, protocol=protocol, userdata=refresh_event)
+    client.suppress_exceptions = True
 
     client.on_connect = lambda c, u, f, r, p=None: on_connect_callback(c, u, f, r, p, refresh_event)
     client.on_message = lambda c, u, m: on_message_callback(c, u, m, refresh_event, t)
@@ -337,7 +357,7 @@ def start_mqtt_client():
     # Set Last Will and Testament before connecting if availability is enabled
     if availability_topic:
         try:
-            client.will_set(availability_topic, payload="offline", retain=True, qos=1)
+            client.will_set(availability_topic, payload="offline", retain=True, qos=0)
         except Exception as e:
             _LOGGER.warning(f"Could not set MQTT will: {e}")
 
@@ -359,15 +379,6 @@ def start_mqtt_client():
             _LOGGER.error(f"Failed to connect to MQTT broker ({e}). Retrying in 10 seconds...")
             time.sleep(10)
 
-    refresh_topic = (
-        getattr(config, "mqtt_refresh_topic", None) or f"{getattr(config, 'transit', 'rtl').lower()}/schedule/refresh"
-    )
-    status_topic = (
-        getattr(config, "mqtt_hass_status_topic", None)
-        or f"{getattr(config, 'hass_discovery_prefix', 'homeassistant')}/status"
-    )
-    client.subscribe(refresh_topic)
-    client.subscribe(status_topic)
     client.loop_start()
 
     # Resolve stop IDs with retry logic
@@ -396,13 +407,6 @@ def start_mqtt_client():
             _LOGGER.warning("No valid stops could be resolved yet. Retrying in 15 seconds...")
             time.sleep(15)
 
-    # Initial availability and discovery publish
-    publish_availability(client, "online")
-
-    if config.hass_discovery_enabled:
-        for stop_config, _ in stop_configs_with_ids:
-            publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
-
     try:
         while True:
             try:
@@ -411,9 +415,25 @@ def start_mqtt_client():
                 now = datetime.datetime.now()
                 earliest_next_arrival = None
 
+                # Watchdog: ensure background loop thread and connection remain alive
+                loop_thread = getattr(client, "_thread", None)
+                if loop_thread is not None and not loop_thread.is_alive():
+                    _LOGGER.warning("MQTT background loop thread was not running. Restarting loop...")
+                    try:
+                        client.loop_start()
+                    except Exception as e:
+                        _LOGGER.error(f"Failed to restart MQTT loop: {e}")
+
+                if not client.is_connected():
+                    _LOGGER.warning("MQTT client disconnected. Attempting to reconnect...")
+                    try:
+                        client.reconnect()
+                    except Exception as e:
+                        _LOGGER.error(f"Failed to reconnect to MQTT broker: {e}")
+
                 # Keep availability alive and republish discovery every cycle
                 # so that Home Assistant always receives configs/online even after late restart
-                publish_availability(client, "online")
+                publish_availability(client, "online", qos=0)
                 if config.hass_discovery_enabled:
                     for stop_config, _ in stop_configs_with_ids:
                         publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
@@ -482,7 +502,7 @@ def start_mqtt_client():
         avail_topic = get_availability_topic()
         if avail_topic:
             try:
-                client.publish(avail_topic, payload="offline", retain=False, qos=1)
+                client.publish(avail_topic, payload="offline", retain=False, qos=0)
             except Exception:
                 pass
         client.loop_stop()

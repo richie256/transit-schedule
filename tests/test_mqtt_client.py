@@ -274,7 +274,7 @@ def test_on_connect_callback_success(mock_cfg):
     mock_client.subscribe.assert_any_call("status_topic")
 
     # Published availability
-    mock_client.publish.assert_any_call("avail_topic", payload="online", retain=True, qos=1)
+    mock_client.publish.assert_any_call("avail_topic", payload="online", retain=True, qos=0)
 
     # Triggered refresh event
     mock_event.set.assert_called_once()
@@ -362,7 +362,7 @@ def test_publish_availability(mock_cfg):
     mock_cfg.mqtt_availability_topic = "home/transit/rtl/status"
     client = MagicMock()
     publish_availability(client, "online")
-    client.publish.assert_called_once_with("home/transit/rtl/status", payload="online", retain=True, qos=1)
+    client.publish.assert_called_once_with("home/transit/rtl/status", payload="online", retain=True, qos=0)
 
     # Disabled availability
     mock_cfg.mqtt_availability_topic = None
@@ -443,3 +443,22 @@ def test_publish_schedule_dual_publishes_with_route_id(mock_cfg):
     topics = [call_args[0][0] for call_args in mock_client.publish.call_args_list]
     assert "home/transit/rtl/stop_12345_14" in topics
     assert "home/transit/rtl/stop_12345" in topics
+
+
+@patch("transit_schedule.mqtt_client.config")
+def test_get_mqtt_protocol(mock_cfg):
+    import paho.mqtt.client as mqtt
+
+    from transit_schedule.mqtt_client import get_mqtt_protocol
+
+    mock_cfg.mqtt_protocol = "3.1.1"
+    assert get_mqtt_protocol() == mqtt.MQTTv311
+
+    mock_cfg.mqtt_protocol = "5"
+    assert get_mqtt_protocol() == mqtt.MQTTv5
+
+    mock_cfg.mqtt_protocol = "v5"
+    assert get_mqtt_protocol() == mqtt.MQTTv5
+
+    mock_cfg.mqtt_protocol = "unknown"
+    assert get_mqtt_protocol() == mqtt.MQTTv311

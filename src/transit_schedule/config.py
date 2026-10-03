@@ -110,6 +110,7 @@ class Config:
         )
 
         self.mqtt_hass_status_topic = os.environ.get("MQTT_HASS_STATUS_TOPIC", f"{self.hass_discovery_prefix}/status")
+        self.mqtt_protocol = os.environ.get("MQTT_PROTOCOL", "3.1.1").strip()
 
         raw_avail = os.environ.get("MQTT_AVAILABILITY_TOPIC", f"home/transit/{self.transit.lower()}/status")
         if raw_avail and raw_avail.strip().lower() in ("none", "false", "off", "0", ""):
