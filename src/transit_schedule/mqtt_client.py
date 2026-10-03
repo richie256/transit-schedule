@@ -222,14 +222,24 @@ def on_connect_callback(client, userdata, flags, reason_code, properties=None, r
 
     if is_success:
         _LOGGER.info("Connected to MQTT broker successfully.")
-        client.subscribe(config.mqtt_refresh_topic)
-        client.subscribe(config.mqtt_hass_status_topic)
+        refresh_topic = (
+            getattr(config, "mqtt_refresh_topic", None)
+            or f"{getattr(config, 'transit', 'rtl').lower()}/schedule/refresh"
+        )
+        status_topic = (
+            getattr(config, "mqtt_hass_status_topic", None)
+            or f"{getattr(config, 'hass_discovery_prefix', 'homeassistant')}/status"
+        )
+        client.subscribe(refresh_topic)
+        client.subscribe(status_topic)
 
         publish_availability(client, "online")
 
-        if config.hass_discovery_enabled:
-            for stop_config in config.stops:
-                publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
+        if getattr(config, "hass_discovery_enabled", False):
+            for stop_config in getattr(config, "stops", []):
+                publish_hass_discovery_config(
+                    client, stop_config, getattr(config, "hass_discovery_prefix", "homeassistant")
+                )
 
         event = refresh_event or (
             userdata if (isinstance(userdata, threading.Event) or hasattr(userdata, "set")) else None
@@ -242,10 +252,17 @@ def on_connect_callback(client, userdata, flags, reason_code, properties=None, r
 
 def on_message_callback(client, userdata, msg, refresh_event, t):
     _LOGGER.info(f"Received message on topic {msg.topic}")
-    if msg.topic == config.mqtt_refresh_topic:
+    refresh_topic = (
+        getattr(config, "mqtt_refresh_topic", None) or f"{getattr(config, 'transit', 'rtl').lower()}/schedule/refresh"
+    )
+    status_topic = (
+        getattr(config, "mqtt_hass_status_topic", None)
+        or f"{getattr(config, 'hass_discovery_prefix', 'homeassistant')}/status"
+    )
+    if msg.topic == refresh_topic:
         _LOGGER.info(t["refresh_action_received"])
         refresh_event.set()
-    elif msg.topic == config.mqtt_hass_status_topic:
+    elif msg.topic == status_topic:
         _LOGGER.info(t["hass_status_received"])
         payload = getattr(msg, "payload", None)
         if isinstance(payload, bytes):
@@ -257,9 +274,11 @@ def on_message_callback(client, userdata, msg, refresh_event, t):
 
         if payload_str != "offline":
             publish_availability(client, "online")
-            if config.hass_discovery_enabled:
-                for stop_config in config.stops:
-                    publish_hass_discovery_config(client, stop_config, config.hass_discovery_prefix)
+            if getattr(config, "hass_discovery_enabled", False):
+                for stop_config in getattr(config, "stops", []):
+                    publish_hass_discovery_config(
+                        client, stop_config, getattr(config, "hass_discovery_prefix", "homeassistant")
+                    )
             refresh_event.set()
 
 
@@ -340,8 +359,15 @@ def start_mqtt_client():
             _LOGGER.error(f"Failed to connect to MQTT broker ({e}). Retrying in 10 seconds...")
             time.sleep(10)
 
-    client.subscribe(config.mqtt_refresh_topic)
-    client.subscribe(config.mqtt_hass_status_topic)
+    refresh_topic = (
+        getattr(config, "mqtt_refresh_topic", None) or f"{getattr(config, 'transit', 'rtl').lower()}/schedule/refresh"
+    )
+    status_topic = (
+        getattr(config, "mqtt_hass_status_topic", None)
+        or f"{getattr(config, 'hass_discovery_prefix', 'homeassistant')}/status"
+    )
+    client.subscribe(refresh_topic)
+    client.subscribe(status_topic)
     client.loop_start()
 
     # Resolve stop IDs with retry logic
